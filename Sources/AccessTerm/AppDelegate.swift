@@ -271,6 +271,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         copyOutput.keyEquivalentModifierMask = [.command, .shift]
         termMenu.addItem(.separator())
 
+        termMenu.addItem(withTitle: "Clear Screen and Scrollback",
+                         action: #selector(MainViewController.clearScreenAndScrollback(_:)),
+                         keyEquivalent: "k")
+        let clearScrollback = termMenu.addItem(withTitle: "Clear Scrollback",
+                                               action: #selector(MainViewController.clearScrollback(_:)),
+                                               keyEquivalent: "k")
+        clearScrollback.keyEquivalentModifierMask = [.command, .option]
+        termMenu.addItem(.separator())
+
         let readLine = termMenu.addItem(withTitle: "Read Current Line",
                                         action: #selector(MainViewController.readCurrentLine(_:)),
                                         keyEquivalent: "l")

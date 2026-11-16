@@ -993,6 +993,43 @@ final class MainViewController: NSViewController,
         landCaret(at: lastLineStart)
     }
 
+    /// Command-K: the transcript and every command in it go, and what is left is the line being
+    /// typed on. Nothing is sent to the shell.
+    @objc func clearScreenAndScrollback(_ sender: Any?) {
+        clearTranscript(.everything, announcing: "Screen and scrollback cleared")
+    }
+
+    /// Option-Command-K: what has scrolled off the top of the terminal's screen goes, and the
+    /// screen's own worth of rows stays.
+    @objc func clearScrollback(_ sender: Any?) {
+        clearTranscript(.scrollback, announcing: "Scrollback cleared")
+    }
+
+    private func clearTranscript(_ scope: TerminalSession.ClearScope, announcing message: String) {
+        // A full-screen program's screen is not the transcript, and the cursor the session
+        // would work from is the program's own.
+        guard screenLines == nil, let storage = textView.textStorage else { return }
+        let before = transcript.length
+        let lines = session.clear(scope)
+        let removed = before - transcript.length
+        news.dropFirst(lines)
+        if let offset = lastCommandOffset {
+            lastCommandOffset = offset >= removed ? offset - removed : nil
+        }
+        if removed > 0 {
+            // Dropped from the text the same way it was dropped from the transcript, rather
+            // than rebuilt, so the lines that stay keep their colours.
+            let selection = textView.selectedRange()
+            textView.withoutSelfVoicing {
+                storage.deleteCharacters(in: NSRange(location: 0, length: min(removed, storage.length)))
+                let location = max(0, selection.location - removed)
+                let end = max(0, selection.location + selection.length - removed)
+                textView.setSelectedRange(NSRange(location: location, length: end - location))
+            }
+        }
+        announcer.announceNow(message)
+    }
+
     @objc func readCurrentLine(_ sender: Any?) {
         if lastFrame != nil { readCursor(.line); return }
         announcer.announceNow(liveText.isEmpty ? "Current line is empty" : liveText)
@@ -1115,6 +1152,8 @@ final class MainViewController: NSViewController,
             menuItem.state = announcer.enabled ? .on : .off
         }
         switch menuItem.action {
+        case #selector(clearScreenAndScrollback(_:)), #selector(clearScrollback(_:)):
+            return screenLines == nil
         case #selector(toggleTrackCursor(_:)): menuItem.state = Settings.trackCursor ? .on : .off
         case #selector(readCursorByAnnouncing(_:)):
             menuItem.state = Settings.fullScreenReading == .announce ? .on : .off

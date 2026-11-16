@@ -145,6 +145,10 @@ final class TerminalSession: TerminalDelegate, LocalProcessDelegate {
 
     /// Rows for a line that did not come from the buffer.
     private static let noRows = 0..<0
+    /// Rows for a line whose rows were wiped or renumbered: it is history now, which is what
+    /// tells clearing the scrollback to take it, where a line the app wrote itself is not
+    /// history on its own account.
+    private static let lostRows = -1..<(-1)
 
     /// Diagnostic only: when ACCESSTERM_LOG names a path, every byte the pty produces is
     /// appended to that file exactly as it arrived, escape sequences and all. It is the
@@ -406,7 +410,7 @@ final class TerminalSession: TerminalDelegate, LocalProcessDelegate {
     /// are about to mean something else. Reading starts again at `restart`.
     private func resyncRows(from restart: Int) {
         rowToLine.removeAll()
-        for index in lineRows.indices { lineRows[index] = TerminalSession.noRows }
+        for index in lineRows.indices { lineRows[index] = TerminalSession.lostRows }
         // Markers still waiting on a row are not lost with it: whatever they were waiting to
         // see is about to be drawn where reading starts again. The C that says a command's
         // output starts here arrives just before `clear` wipes the screen, and dropping it
@@ -417,6 +421,111 @@ final class TerminalSession: TerminalDelegate, LocalProcessDelegate {
         extentRow = restart
         mappedFrom = restart
         frameStart = restart
+    }
+
+    // MARK: - Clearing
+
+    /// What a clear takes away.
+    enum ClearScope {
+        /// The transcript and every command in it: what is left is the line being typed on.
+        case everything
+        /// What has scrolled off the top of the terminal's screen. What is on the screen, a
+        /// terminal's height of the most recent rows, stays.
+        case scrollback
+    }
+
+    /// Clears the transcript, as Command-K and Option-Command-K do in Terminal. Nothing is
+    /// sent to the shell: this is the transcript only, and a running program carries on.
+    /// Not for a full-screen program's screen, which is not the transcript; the caller
+    /// leaves those alone. Returns how many lines went from the start of the transcript, so a
+    /// mirror of it can drop the same ones.
+    @discardableResult
+    func clear(_ scope: ClearScope) -> Int {
+        guard !terminal.isCurrentBufferAlternate else { return 0 }
+        let trimmed = terminal.buffer.totalLinesTrimmed
+        let screenTop = trimmed + terminal.getTopVisibleRow()
+
+        let floor: Int
+        let removed: Int
+        switch scope {
+        case .everything:
+            // The row the cursor's line starts on, which is where the live region starts:
+            // the prompt being typed at, or a program's unfinished line. Everything above it
+            // is gone, including rows that never became lines.
+            var liveStart = screenTop + terminal.buffer.y
+            while liveStart > screenTop, isWrapped(liveStart) { liveStart -= 1 }
+            floor = liveStart
+            removed = transcript.count
+            dropLines(removed)
+        case .scrollback:
+            // Up to and including the last line that is history. Lines the app wrote itself
+            // go with the history that follows them, never on their own account.
+            var count = 0
+            for index in lineRows.indices {
+                let rows = lineRows[index]
+                if rows == TerminalSession.lostRows || (!rows.isEmpty && rows.upperBound <= screenTop) {
+                    count = index + 1
+                }
+            }
+            floor = screenTop
+            removed = count
+            dropLines(count)
+        }
+        // Reading carries on from the floor, so nothing above it is read back in -- not the
+        // rows that never became lines, and not a frame a program redraws over rows that
+        // were cleared.
+        extentRow = max(extentRow, floor)
+        mappedFrom = max(mappedFrom, floor)
+        frameStart = max(frameStart, floor)
+        pendingAnchors = pendingAnchors.filter { $0.key >= floor }
+        return removed
+    }
+
+    /// Takes the first `count` lines out of the transcript and renumbers the rest, along
+    /// with everything that is numbered in lines: the rows they were built from, the echo
+    /// marks, the command blocks and their turns.
+    private func dropLines(_ count: Int) {
+        guard count > 0 else { return }
+        func shifted(_ line: Int?) -> Int? { line.flatMap { $0 >= count ? $0 - count : nil } }
+
+        transcript.removeFirst(count)
+        lineRows.removeFirst(min(count, lineRows.count))
+        rowToLine = rowToLine.compactMapValues { shifted($0) }
+        userEchoLines = Set(userEchoLines.compactMap { shifted($0) })
+
+        // A block goes with its lines. The one still open stays whatever happens, because
+        // its end is yet to come, and is marked when it lost its own lines.
+        var newIndex: [Int: Int] = [:]
+        var kept: [RawBlock] = []
+        for (index, original) in rawBlocks.enumerated() {
+            var block = original
+            let start = block.promptLine ?? block.commandLine ?? block.outputStart
+            let isOpen = index == rawBlocks.count - 1 && !block.isFinished
+            guard isOpen || (start.map { $0 >= count } ?? false) else { continue }
+            if isOpen, block.didRun, (start ?? Int.max) < count { block.cleared = true }
+            block.promptLine = shifted(block.promptLine)
+            block.commandLine = shifted(block.commandLine)
+            block.outputStart = shifted(block.outputStart)
+            block.outputEnd = shifted(block.outputEnd)
+            newIndex[index] = kept.count
+            kept.append(block)
+        }
+        rawBlocks = kept
+
+        rawTurns = rawTurns.compactMap { turn in
+            guard let block = newIndex[turn.block], let line = shifted(turn.commandLine) else { return nil }
+            var turn = turn
+            turn.block = block
+            turn.commandLine = line
+            turn.outputEnd = shifted(turn.outputEnd)
+            return turn
+        }
+        pendingAnchors = pendingAnchors.mapValues { waiting in
+            waiting.compactMap { entry in
+                newIndex[entry.block].map { (block: $0, anchor: entry.anchor) }
+            }
+        }
+        justFinished = justFinished.compactMap { newIndex[$0] }
     }
 
     func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
@@ -455,6 +564,10 @@ final class TerminalSession: TerminalDelegate, LocalProcessDelegate {
         /// Whether the command ever started running. A prompt sitting waiting for input has
         /// not, and is not a block worth showing anyone.
         var didRun = false
+        /// Set when a clear took the lines this block was made of while it was still
+        /// running. It stays, so that the program's turns and its end are still seen, but
+        /// it is no longer a block anyone can step to.
+        var cleared = false
 
         var promptLine: Int?
         var commandLine: Int?
@@ -514,7 +627,7 @@ final class TerminalSession: TerminalDelegate, LocalProcessDelegate {
                                  outputLines: 0..<transcript.count, exitCode: nil, isFinished: false)]
         }
         return rawBlocks.enumerated().compactMap { index, block in
-            guard var block = published(block) else { return nil }
+            guard !block.cleared, var block = published(block) else { return nil }
             block.turns = rawTurns.filter { $0.block == index }
                 .map { published($0, within: block) }
             return block

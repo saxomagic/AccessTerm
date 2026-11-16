@@ -219,6 +219,14 @@ work from anywhere in the window.
 | Option-Command-Up | Previous command |
 | Option-Command-Down | Next command |
 | Command-Shift-O | Copy the output of the command the caret is in |
+| Command-K | Clear the screen and scrollback: the transcript and its commands go, and the prompt stays |
+| Option-Command-K | Clear the scrollback only: what has scrolled off the top of the terminal's screen goes, and the most recent screenful stays |
+
+Both clears only change the transcript. Nothing is sent to the shell, and a command that is
+running carries on (its earlier output is gone from the transcript, and it can no longer be
+stepped to as a command). They say "Screen and scrollback cleared" or "Scrollback cleared", and
+are unavailable (greyed out in the Terminal menu) while a full-screen program such as vim is
+showing.
 
 ### While the caret is in the transcript
 

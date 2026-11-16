@@ -42,6 +42,19 @@ final class Transcript {
         return lines.count - 1
     }
 
+    /// Drops the first `count` lines, which is what clearing scrollback does. Every line after
+    /// them is renumbered down by `count`.
+    func removeFirst(_ count: Int) {
+        let count = max(0, min(count, lines.count))
+        guard count > 0 else { return }
+        // Where the first surviving line starts, which is how much text goes.
+        let cut = count < offsets.count ? offsets[count] : length
+        lines.removeFirst(count)
+        offsets.removeFirst(count)
+        for index in offsets.indices { offsets[index] -= cut }
+        length -= cut
+    }
+
     /// Rewrites one line. Nil when the text is unchanged, which is the common case: most of
     /// what a redraw rewrites is identical to what was there.
     func revise(_ line: Int, to text: String) -> Edit? {

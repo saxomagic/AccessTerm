@@ -8,6 +8,14 @@ import AppKit
 struct LineNews {
     private var announced: [Int: String] = [:]
 
+    /// The first `count` lines of the transcript are gone and the rest renumbered down, so what
+    /// was said about the survivors is still known under their new numbers.
+    mutating func dropFirst(_ count: Int) {
+        announced = announced.reduce(into: [:]) { kept, entry in
+            if entry.key >= count { kept[entry.key - count] = entry.value }
+        }
+    }
+
     mutating func news(in update: TerminalUpdate) -> [String] {
         var byLine: [Int: String] = [:]
         for edit in update.edits { byLine[edit.line] = edit.text }
